@@ -11,8 +11,8 @@ target_link_libraries(test_static bcc-static)
 
 add_test(NAME c_test_static COMMAND ${TEST_WRAPPER} c_test_static sudo ${CMAKE_CURRENT_BINARY_DIR}/test_static)
 
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-unused-result")
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wno-unused-result")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-unused-result -fPIC")
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wno-unused-result -fPIC")
 
 if(ENABLE_USDT)
 set(TEST_LIBBCC_SOURCES
@@ -26,6 +26,7 @@ set(TEST_LIBBCC_SOURCES
 	test_perf_event.cc
 	test_pinned_table.cc
 	test_prog_table.cc
+	test_queuestack_table.cc
 	test_shared_table.cc
 	test_sk_storage.cc
 	test_sock_table.cc
@@ -37,7 +38,7 @@ set(TEST_LIBBCC_SOURCES
 add_executable(test_libbcc ${TEST_LIBBCC_SOURCES})
 
 file(COPY dummy_proc_map.txt DESTINATION ${CMAKE_CURRENT_BINARY_DIR})
-add_library(usdt_test_lib SHARED usdt_test_lib.c)
+add_library(usdt_test_lib SHARED usdt_test_lib.cc)
 
 add_dependencies(test_libbcc bcc-shared)
 target_link_libraries(test_libbcc ${PROJECT_BINARY_DIR}/src/cc/libbcc.so dl usdt_test_lib)

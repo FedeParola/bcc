@@ -37,20 +37,20 @@ probe_create(struct inode *dir, struct dentry *dentry)
 }
 
 SEC("kprobe/vfs_create")
-int BPF_KPROBE(kprobe__vfs_create, struct inode *dir, struct dentry *dentry)
+int BPF_KPROBE(vfs_create, struct inode *dir, struct dentry *dentry)
 {
 	return probe_create(dir, dentry);
 }
 
 SEC("kprobe/security_inode_create")
-int BPF_KPROBE(kprobe__security_inode_create, struct inode *dir,
+int BPF_KPROBE(security_inode_create, struct inode *dir,
 	     struct dentry *dentry)
 {
 	return probe_create(dir, dentry);
 }
 
 SEC("kprobe/vfs_unlink")
-int BPF_KPROBE(kprobe__vfs_unlink, struct inode *dir, struct dentry *dentry)
+int BPF_KPROBE(vfs_unlink, struct inode *dir, struct dentry *dentry)
 {
 	u64 id = bpf_get_current_pid_tgid();
 	struct event event = {};
@@ -68,7 +68,7 @@ int BPF_KPROBE(kprobe__vfs_unlink, struct inode *dir, struct dentry *dentry)
 
 	qs_name_ptr = BPF_CORE_READ(dentry, d_name.name);
 	qs_len = BPF_CORE_READ(dentry, d_name.len);
-	bpf_probe_read_str(&event.file, sizeof(event.file), qs_name_ptr);
+	bpf_probe_read_kernel_str(&event.file, sizeof(event.file), qs_name_ptr);
 	bpf_get_current_comm(&event.task, sizeof(event.task));
 	event.delta_ns = delta_ns;
 	event.tgid = tgid;

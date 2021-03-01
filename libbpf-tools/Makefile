@@ -9,7 +9,38 @@ INCLUDES := -I$(OUTPUT)
 CFLAGS := -g -O2 -Wall
 ARCH := $(shell uname -m | sed 's/x86_64/x86/')
 
-APPS = drsnoop filelife opensnoop runqslower xfsslower
+APPS = \
+	biolatency \
+	biopattern \
+	biosnoop \
+	biostacks \
+	bitesize \
+	cpudist \
+	drsnoop \
+	execsnoop \
+	filelife \
+	hardirqs \
+	llcstat \
+	numamove \
+	opensnoop \
+	readahead \
+	runqlat \
+	runqlen \
+	runqslower \
+	softirqs \
+	syscount \
+	tcpconnect \
+	tcpconnlat \
+	vfsstat \
+	xfsslower \
+	#
+
+COMMON_OBJ = \
+	$(OUTPUT)/trace_helpers.o \
+	$(OUTPUT)/syscall_helpers.o \
+	$(OUTPUT)/errno_helpers.o \
+	$(OUTPUT)/map_helpers.o \
+	#
 
 .PHONY: all
 all: $(APPS)
@@ -32,7 +63,7 @@ $(OUTPUT) $(OUTPUT)/libbpf:
 	$(call msg,MKDIR,$@)
 	$(Q)mkdir -p $@
 
-$(APPS): %: $(OUTPUT)/%.o $(LIBBPF_OBJ) $(OUTPUT)/trace_helpers.o | $(OUTPUT)
+$(APPS): %: $(OUTPUT)/%.o $(LIBBPF_OBJ) $(COMMON_OBJ) | $(OUTPUT)
 	$(call msg,BINARY,$@)
 	$(Q)$(CC) $(CFLAGS) $^ -lelf -lz -o $@
 

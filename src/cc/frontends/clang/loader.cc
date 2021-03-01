@@ -152,7 +152,8 @@ int ClangLoader::parse(unique_ptr<llvm::Module> *mod, TableStorage &ts,
       kpath = tmpdir;
     } else {
       std::cout << "Unable to find kernel headers. ";
-      std::cout << "Try rebuilding kernel with CONFIG_IKHEADERS=m (module)\n";
+      std::cout << "Try rebuilding kernel with CONFIG_IKHEADERS=m (module) ";
+      std::cout <<  "or installing the kernel development package for your running kernel version.\n";
     }
   }
 
@@ -253,7 +254,7 @@ int ClangLoader::parse(unique_ptr<llvm::Module> *mod, TableStorage &ts,
   return 0;
 }
 
-void *get_clang_target_cb(bcc_arch_t arch)
+void *get_clang_target_cb(bcc_arch_t arch, bool for_syscall)
 {
   const char *ret;
 
@@ -317,6 +318,11 @@ int ClangLoader::do_compile(unique_ptr<llvm::Module> *mod, TableStorage &ts,
 
   string target_triple = get_clang_target();
   driver::Driver drv("", target_triple, diags);
+
+#if LLVM_MAJOR_VERSION >= 4
+  if (target_triple == "x86_64-unknown-linux-gnu")
+    flags_cstr.push_back("-fno-jump-tables");
+#endif
 
   drv.setTitle("bcc-clang-driver");
   drv.setCheckInputsExist(false);

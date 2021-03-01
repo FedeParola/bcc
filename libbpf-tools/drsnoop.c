@@ -7,7 +7,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/resource.h>
 #include <unistd.h>
 #include <time.h>
 #include <bpf/libbpf.h>
@@ -28,7 +27,7 @@ static struct env {
 } env = { };
 
 const char *argp_program_version = "drsnoop 0.1";
-const char *argp_program_bug_address = "<ethercflow@gmail.com>";
+const char *argp_program_bug_address = "<bpf@vger.kernel.org>";
 const char argp_program_doc[] =
 "Trace direct reclaim latency.\n"
 "\n"
@@ -98,21 +97,11 @@ static error_t parse_arg(int key, char *arg, struct argp_state *state)
 }
 
 int libbpf_print_fn(enum libbpf_print_level level,
-            const char *format, va_list args)
+		    const char *format, va_list args)
 {
 	if (level == LIBBPF_DEBUG && !env.verbose)
 		return 0;
 	return vfprintf(stderr, format, args);
-}
-
-static int bump_memlock_rlimit(void)
-{
-	struct rlimit rlim_new = {
-		.rlim_cur	= RLIM_INFINITY,
-		.rlim_max	= RLIM_INFINITY,
-	};
-
-	return setrlimit(RLIMIT_MEMLOCK, &rlim_new);
 }
 
 void handle_event(void *ctx, int cpu, void *data, __u32 data_sz)
@@ -126,7 +115,7 @@ void handle_event(void *ctx, int cpu, void *data, __u32 data_sz)
 	tm = localtime(&t);
 	strftime(ts, sizeof(ts), "%H:%M:%S", tm);
 	printf("%-8s %-16s %-6d %8.3f %5lld",
-	       ts, e->task, e->pid, (double)e->delta_ns / 1000000,
+	       ts, e->task, e->pid, e->delta_ns / 1000000.0,
 	       e->nr_reclaimed);
 	if (env.extended)
 		printf(" %8llu", e->nr_free_pages * page_size / 1024);
@@ -150,7 +139,7 @@ int main(int argc, char **argv)
 	struct ksyms *ksyms = NULL;
 	const struct ksym *ksym;
 	struct drsnoop_bpf *obj;
-	time_t start_time;
+	__u64 time_end = 0;
 	int err;
 
 	err = argp_parse(&argp, argc, argv, 0, NULL, NULL);
@@ -167,7 +156,7 @@ int main(int argc, char **argv)
 
 	obj = drsnoop_bpf__open();
 	if (!obj) {
-		fprintf(stderr, "failed to open and/or load BPF ojbect\n");
+		fprintf(stderr, "failed to open and/or load BPF object\n");
 		return 1;
 	}
 
@@ -207,7 +196,7 @@ int main(int argc, char **argv)
 	else
 		printf("... Hit Ctrl-C to end.\n");
 	printf("%-8s %-16s %-6s %8s %5s",
-	        "TIME", "COMM", "TID", "LAT(ms)", "PAGES");
+		"TIME", "COMM", "TID", "LAT(ms)", "PAGES");
 	if (env.extended)
 		printf(" %8s", "FREE(KB)");
 	printf("\n");
@@ -223,13 +212,18 @@ int main(int argc, char **argv)
 		goto cleanup;
 	}
 
-	start_time = time(NULL);
-	while (!env.duration || time(NULL) - start_time < env.duration) {
-		if ((err = perf_buffer__poll(pb, PERF_POLL_TIMEOUT_MS)) < 0) {
-			printf("error polling perf buffer: %d\n", err);
+	/* setup duration */
+	if (env.duration)
+		time_end = get_ktime_ns() + env.duration * NSEC_PER_SEC;
+
+	/* main: poll */
+	while (1) {
+		if ((err = perf_buffer__poll(pb, PERF_POLL_TIMEOUT_MS)) < 0)
 			break;
-		}
+		if (env.duration && get_ktime_ns() > time_end)
+			goto cleanup;
 	}
+	printf("error polling perf buffer: %d\n", err);
 
 cleanup:
 	perf_buffer__free(pb);

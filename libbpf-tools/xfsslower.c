@@ -9,7 +9,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/resource.h>
 #include <unistd.h>
 #include <time.h>
 #include <bpf/libbpf.h>
@@ -22,7 +21,6 @@
 #define PERF_BUFFER_TIME_MS	10
 #define PERF_POLL_TIMEOUT_MS	100
 
-#define NSEC_PER_SEC		1000000000ULL
 
 static struct env {
 	pid_t pid;
@@ -35,7 +33,7 @@ static struct env {
 };
 
 const char *argp_program_version = "xfsslower 0.1";
-const char *argp_program_bug_address = "<ethercflow@gmail.com>";
+const char *argp_program_bug_address = "<bpf@vger.kernel.org>";
 const char argp_program_doc[] =
 "Trace common XFS file operations slower than a threshold.\n"
 "\n"
@@ -50,7 +48,6 @@ const char argp_program_doc[] =
 static const struct argp_option opts[] = {
 	{ "csv", 'c', NULL, 0, "Output as csv" },
 	{ "duration", 'd', "DURATION", 0, "Total duration of trace in seconds" },
-	{ NULL, 'h', NULL, OPTION_HIDDEN, "Show the full help"},
 	{ "pid", 'p', "PID", 0, "Process PID to trace" },
 	{ "min", 'm', "MIN", 0, "Min latency of trace in ms (default 10)" },
 	{ "verbose", 'v', NULL, 0, "Verbose debug output" },
@@ -66,9 +63,6 @@ static error_t parse_arg(int key, char *arg, struct argp_state *state)
 	switch (key) {
 	case 'v':
 		env.verbose = true;
-		break;
-	case 'h':
-		argp_usage(state);
 		break;
 	case 'c':
 		env.csv = true;
@@ -106,21 +100,11 @@ static error_t parse_arg(int key, char *arg, struct argp_state *state)
 }
 
 int libbpf_print_fn(enum libbpf_print_level level,
-		const char *format, va_list args)
+		    const char *format, va_list args)
 {
 	if (level == LIBBPF_DEBUG && !env.verbose)
 		return 0;
 	return vfprintf(stderr, format, args);
-}
-
-static int bump_memlock_rlimit(void)
-{
-	struct rlimit rlim_new = {
-		.rlim_cur	= RLIM_INFINITY,
-		.rlim_max	= RLIM_INFINITY,
-	};
-
-	return setrlimit(RLIMIT_MEMLOCK, &rlim_new);
 }
 
 void handle_event(void *ctx, int cpu, void *data, __u32 data_sz)
@@ -157,14 +141,6 @@ void handle_lost_events(void *ctx, int cpu, __u64 lost_cnt)
 	fprintf(stderr, "lost %llu events on CPU #%d\n", lost_cnt, cpu);
 }
 
-uint64_t get_ktime_ns(void)
-{
-	struct timespec ts;
-
-	clock_gettime(CLOCK_MONOTONIC, &ts);
-	return ts.tv_sec * NSEC_PER_SEC + ts.tv_nsec;
-}
-
 int main(int argc, char **argv)
 {
 	static const struct argp argp = {
@@ -192,7 +168,7 @@ int main(int argc, char **argv)
 
 	obj = xfsslower_bpf__open();
 	if (!obj) {
-		fprintf(stderr, "failed to open and/or load BPF ojbect\n");
+		fprintf(stderr, "failed to open and/or load BPF object\n");
 		return 1;
 	}
 

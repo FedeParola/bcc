@@ -37,12 +37,16 @@
 #include "bcc_libbpf_inc.h"
 
 #include "libbpf.h"
+#include "bcc_syms.h"
 
 namespace ebpf {
 
 constexpr int MAX_CALLING_CONV_REGS = 6;
 const char *calling_conv_regs_x86[] = {
   "di", "si", "dx", "cx", "r8", "r9"
+};
+const char *calling_conv_syscall_regs_x86[] = {
+  "di", "si", "dx", "r10", "r8", "r9"
 };
 const char *calling_conv_regs_ppc[] = {"gpr[3]", "gpr[4]", "gpr[5]",
                                        "gpr[6]", "gpr[7]", "gpr[8]"};
@@ -53,7 +57,7 @@ const char *calling_conv_regs_s390x[] = {"gprs[2]", "gprs[3]", "gprs[4]",
 const char *calling_conv_regs_arm64[] = {"regs[0]", "regs[1]", "regs[2]",
                                        "regs[3]", "regs[4]", "regs[5]"};
 
-void *get_call_conv_cb(bcc_arch_t arch)
+void *get_call_conv_cb(bcc_arch_t arch, bool for_syscall)
 {
   const char **ret;
 
@@ -69,17 +73,70 @@ void *get_call_conv_cb(bcc_arch_t arch)
       ret = calling_conv_regs_arm64;
       break;
     default:
-      ret = calling_conv_regs_x86;
+      if (for_syscall)
+        ret = calling_conv_syscall_regs_x86;
+      else
+        ret = calling_conv_regs_x86;
   }
 
   return (void *)ret;
 }
 
-const char **get_call_conv(void) {
+const char **get_call_conv(bool for_syscall = false) {
   const char **ret;
 
-  ret = (const char **)run_arch_callback(get_call_conv_cb);
+  ret = (const char **)run_arch_callback(get_call_conv_cb, for_syscall);
   return ret;
+}
+
+/* Use resolver only once per translation */
+static void *kresolver = NULL;
+static void *get_symbol_resolver(void) {
+  if (!kresolver)
+    kresolver = bcc_symcache_new(-1, nullptr);
+  return kresolver;
+}
+
+static std::string check_bpf_probe_read_kernel(void) {
+  bool is_probe_read_kernel;
+  void *resolver = get_symbol_resolver();
+  uint64_t addr = 0;
+  is_probe_read_kernel = bcc_symcache_resolve_name(resolver, nullptr,
+                          "bpf_probe_read_kernel", &addr) >= 0 ? true: false;
+
+  /* If bpf_probe_read is not found (ARCH_HAS_NON_OVERLAPPING_ADDRESS_SPACE) is
+   * not set in newer kernel, then bcc would anyway fail */
+  if (is_probe_read_kernel)
+    return "bpf_probe_read_kernel";
+  else
+    return "bpf_probe_read";
+}
+
+static std::string check_bpf_probe_read_user(llvm::StringRef probe,
+        bool& overlap_addr) {
+  if (probe.str() == "bpf_probe_read_user" ||
+      probe.str() == "bpf_probe_read_user_str") {
+    // Check for probe_user symbols in backported kernel before fallback
+    void *resolver = get_symbol_resolver();
+    uint64_t addr = 0;
+    bool found = bcc_symcache_resolve_name(resolver, nullptr,
+                  "bpf_probe_read_user", &addr) >= 0 ? true: false;
+    if (found)
+      return probe.str();
+
+    /* For arch with overlapping address space, dont use bpf_probe_read for
+     * user read. Just error out */
+#if defined(__s390x__)
+    overlap_addr = true;
+    return "";
+#endif
+
+    if (probe.str() == "bpf_probe_read_user")
+      return "bpf_probe_read";
+    else
+      return "bpf_probe_read_str";
+  }
+  return "";
 }
 
 using std::map;
@@ -265,7 +322,10 @@ bool MapVisitor::VisitCallExpr(CallExpr *Call) {
 ProbeVisitor::ProbeVisitor(ASTContext &C, Rewriter &rewriter,
                            set<Decl *> &m, bool track_helpers) :
   C(C), rewriter_(rewriter), m_(m), track_helpers_(track_helpers),
-  addrof_stmt_(nullptr), is_addrof_(false) {}
+  addrof_stmt_(nullptr), is_addrof_(false) {
+  const char **calling_conv_regs = get_call_conv();
+  has_overlap_kuaddr_ = calling_conv_regs == calling_conv_regs_s390x;
+}
 
 bool ProbeVisitor::assignsExtPtr(Expr *E, int *nbDerefs) {
   if (IsContextMemberExpr(E)) {
@@ -437,7 +497,10 @@ bool ProbeVisitor::VisitUnaryOperator(UnaryOperator *E) {
   memb_visited_.insert(E);
   string pre, post;
   pre = "({ typeof(" + E->getType().getAsString() + ") _val; __builtin_memset(&_val, 0, sizeof(_val));";
-  pre += " bpf_probe_read(&_val, sizeof(_val), (u64)";
+  if (has_overlap_kuaddr_)
+    pre += " bpf_probe_read_kernel(&_val, sizeof(_val), (u64)";
+  else
+    pre += " bpf_probe_read(&_val, sizeof(_val), (u64)";
   post = "); _val; })";
   rewriter_.ReplaceText(expansionLoc(E->getOperatorLoc()), 1, pre);
   rewriter_.InsertTextAfterToken(expansionLoc(GET_ENDLOC(sub)), post);
@@ -498,7 +561,10 @@ bool ProbeVisitor::VisitMemberExpr(MemberExpr *E) {
   string base_type = base->getType()->getPointeeType().getAsString();
   string pre, post;
   pre = "({ typeof(" + E->getType().getAsString() + ") _val; __builtin_memset(&_val, 0, sizeof(_val));";
-  pre += " bpf_probe_read(&_val, sizeof(_val), (u64)&";
+  if (has_overlap_kuaddr_)
+    pre += " bpf_probe_read_kernel(&_val, sizeof(_val), (u64)&";
+  else
+    pre += " bpf_probe_read(&_val, sizeof(_val), (u64)&";
   post = rhs + "); _val; })";
   rewriter_.InsertText(expansionLoc(GET_BEGINLOC(E)), pre);
   rewriter_.ReplaceText(expansionRange(SourceRange(member, GET_ENDLOC(E))), post);
@@ -549,7 +615,10 @@ bool ProbeVisitor::VisitArraySubscriptExpr(ArraySubscriptExpr *E) {
     return true;
 
   pre = "({ typeof(" + E->getType().getAsString() + ") _val; __builtin_memset(&_val, 0, sizeof(_val));";
-  pre += " bpf_probe_read(&_val, sizeof(_val), (u64)((";
+  if (has_overlap_kuaddr_)
+    pre += " bpf_probe_read_kernel(&_val, sizeof(_val), (u64)((";
+  else
+    pre += " bpf_probe_read(&_val, sizeof(_val), (u64)((";
   if (isMemberDereference(base)) {
     pre += "&";
     // If the base of the array subscript is a member dereference, we'll rewrite
@@ -641,7 +710,10 @@ DiagnosticBuilder ProbeVisitor::error(SourceLocation loc, const char (&fmt)[N]) 
 }
 
 BTypeVisitor::BTypeVisitor(ASTContext &C, BFrontendAction &fe)
-    : C(C), diag_(C.getDiagnostics()), fe_(fe), rewriter_(fe.rewriter()), out_(llvm::errs()) {}
+    : C(C), diag_(C.getDiagnostics()), fe_(fe), rewriter_(fe.rewriter()), out_(llvm::errs()) {
+  const char **calling_conv_regs = get_call_conv();
+  has_overlap_kuaddr_ = calling_conv_regs == calling_conv_regs_s390x;
+}
 
 void BTypeVisitor::genParamDirectAssign(FunctionDecl *D, string& preamble,
                                         const char **calling_conv_regs) {
@@ -682,7 +754,11 @@ void BTypeVisitor::genParamIndirectAssign(FunctionDecl *D, string& preamble,
       size_t d = idx - 1;
       const char *reg = calling_conv_regs[d];
       preamble += "\n " + text + ";";
-      preamble += " bpf_probe_read(&" + arg->getName().str() + ", sizeof(" +
+      if (has_overlap_kuaddr_)
+        preamble += " bpf_probe_read_kernel";
+      else
+        preamble += " bpf_probe_read";
+      preamble += "(&" + arg->getName().str() + ", sizeof(" +
                   arg->getName().str() + "), &" + new_ctx + "->" +
                   string(reg) + ");";
     }
@@ -690,7 +766,7 @@ void BTypeVisitor::genParamIndirectAssign(FunctionDecl *D, string& preamble,
 }
 
 void BTypeVisitor::rewriteFuncParam(FunctionDecl *D) {
-  const char **calling_conv_regs = get_call_conv();
+  const char **calling_conv_regs = get_call_conv(true);
 
   string preamble = "{\n";
   if (D->param_size() > 1) {
@@ -701,7 +777,7 @@ void BTypeVisitor::rewriteFuncParam(FunctionDecl *D) {
     // it in case of "syscall__" for other architectures.
     if (strncmp(D->getName().str().c_str(), "syscall__", 9) == 0 ||
         strncmp(D->getName().str().c_str(), "kprobe____x64_sys_", 18) == 0) {
-      preamble += "#ifdef CONFIG_ARCH_HAS_SYSCALL_WRAPPER\n";
+      preamble += "#if defined(CONFIG_ARCH_HAS_SYSCALL_WRAPPER) && !defined(__s390x__)\n";
       genParamIndirectAssign(D, preamble, calling_conv_regs);
       preamble += "\n#else\n";
       genParamDirectAssign(D, preamble, calling_conv_regs);
@@ -847,8 +923,8 @@ bool BTypeVisitor::VisitCallExpr(CallExpr *Call) {
           // events.perf_submit(ctx, &data, sizeof(data));
           // ...
           //                       &data   ->     data    ->  typeof(data)        ->   data_t
-          auto type_arg1 = Call->getArg(1)->IgnoreCasts()->getType().getTypePtr()->getPointeeType().getTypePtr();
-          if (type_arg1->isStructureType()) {
+          auto type_arg1 = Call->getArg(1)->IgnoreCasts()->getType().getTypePtr()->getPointeeType().getTypePtrOrNull();
+          if (type_arg1 && type_arg1->isStructureType()) {
             auto event_type = type_arg1->getAsTagDecl();
             const auto *r = dyn_cast<RecordDecl>(event_type);
             std::vector<std::string> perf_event;
@@ -886,6 +962,62 @@ bool BTypeVisitor::VisitCallExpr(CallExpr *Call) {
           string flag = rewriter_.getRewrittenText(expansionRange(Call->getArg(2)->getSourceRange()));
           txt = "bpf_" + string(memb_name) + "(" + ctx + ", " +
             "bpf_pseudo_fd(1, " + fd + "), " + keyp + ", " + flag + ");";
+        } else if (memb_name == "ringbuf_output") {
+          string name = string(Ref->getDecl()->getName());
+          string args = rewriter_.getRewrittenText(expansionRange(SourceRange(GET_BEGINLOC(Call->getArg(0)),
+                                                           GET_ENDLOC(Call->getArg(2)))));
+          txt = "bpf_ringbuf_output(bpf_pseudo_fd(1, " + fd + ")";
+          txt += ", " + args + ")";
+
+          // e.g.
+          // struct data_t { u32 pid; }; data_t data;
+          // events.ringbuf_output(&data, sizeof(data), 0);
+          // ...
+          //                       &data   ->     data    ->  typeof(data)        ->   data_t
+          auto type_arg0 = Call->getArg(0)->IgnoreCasts()->getType().getTypePtr()->getPointeeType().getTypePtr();
+          if (type_arg0->isStructureType()) {
+            auto event_type = type_arg0->getAsTagDecl();
+            const auto *r = dyn_cast<RecordDecl>(event_type);
+            std::vector<std::string> perf_event;
+
+            for (auto it = r->field_begin(); it != r->field_end(); ++it) {
+              perf_event.push_back(it->getNameAsString() + "#" + it->getType().getAsString()); //"pid#u32"
+            }
+            fe_.perf_events_[name] = perf_event;
+          }
+        } else if (memb_name == "ringbuf_reserve") {
+          string name = string(Ref->getDecl()->getName());
+          string arg0 = rewriter_.getRewrittenText(expansionRange(Call->getArg(0)->getSourceRange()));
+          txt = "bpf_ringbuf_reserve(bpf_pseudo_fd(1, " + fd + ")";
+          txt += ", " + arg0 + ", 0)"; // Flags in reserve are meaningless
+        } else if (memb_name == "ringbuf_discard") {
+          string name = string(Ref->getDecl()->getName());
+          string args = rewriter_.getRewrittenText(expansionRange(SourceRange(GET_BEGINLOC(Call->getArg(0)),
+                                                           GET_ENDLOC(Call->getArg(1)))));
+          txt = "bpf_ringbuf_discard(" + args + ")";
+        } else if (memb_name == "ringbuf_submit") {
+          string name = string(Ref->getDecl()->getName());
+          string args = rewriter_.getRewrittenText(expansionRange(SourceRange(GET_BEGINLOC(Call->getArg(0)),
+                                                           GET_ENDLOC(Call->getArg(1)))));
+          txt = "bpf_ringbuf_submit(" + args + ")";
+
+          // e.g.
+          // struct data_t { u32 pid; };
+          // data_t *data = events.ringbuf_reserve(sizeof(data_t));
+          // events.ringbuf_submit(data, 0);
+          // ...
+          //                       &data   ->     data    ->  typeof(data)        ->   data_t
+          auto type_arg0 = Call->getArg(0)->IgnoreCasts()->getType().getTypePtr()->getPointeeType().getTypePtr();
+          if (type_arg0->isStructureType()) {
+            auto event_type = type_arg0->getAsTagDecl();
+            const auto *r = dyn_cast<RecordDecl>(event_type);
+            std::vector<std::string> perf_event;
+
+            for (auto it = r->field_begin(); it != r->field_end(); ++it) {
+              perf_event.push_back(it->getNameAsString() + "#" + it->getType().getAsString()); //"pid#u32"
+            }
+            fe_.perf_events_[name] = perf_event;
+          }
         } else {
           if (memb_name == "lookup") {
             prefix = "bpf_map_lookup_elem";
@@ -954,6 +1086,19 @@ bool BTypeVisitor::VisitCallExpr(CallExpr *Call) {
   } else if (Call->getCalleeDecl()) {
     NamedDecl *Decl = dyn_cast<NamedDecl>(Call->getCalleeDecl());
     if (!Decl) return true;
+
+    string text;
+
+    // Bail out when bpf_probe_read_user is unavailable for overlapping address
+    // space arch.
+    bool overlap_addr = false;
+    std::string probe = check_bpf_probe_read_user(Decl->getName(),
+                          overlap_addr);
+    if (overlap_addr) {
+      error(GET_BEGINLOC(Call), "bpf_probe_read_user not found. Use latest kernel");
+      return false;
+    }
+
     if (AsmLabelAttr *A = Decl->getAttr<AsmLabelAttr>()) {
       // Functions with the tag asm("llvm.bpf.extra") are implemented in the
       // rewriter rather than as a macro since they may also include nested
@@ -966,10 +1111,10 @@ bool BTypeVisitor::VisitCallExpr(CallExpr *Call) {
         }
 
         vector<string> args;
+
         for (auto arg : Call->arguments())
           args.push_back(rewriter_.getRewrittenText(expansionRange(arg->getSourceRange())));
 
-        string text;
         if (Decl->getName() == "incr_cksum_l3") {
           text = "bpf_l3_csum_replace_(" + fn_args_[0]->getName().str() + ", (u64)";
           text += args[0] + ", " + args[1] + ", " + args[2] + ", sizeof(" + args[2] + "))";
@@ -1001,8 +1146,16 @@ bool BTypeVisitor::VisitCallExpr(CallExpr *Call) {
           text = "({ u64 __addr = 0x0; ";
           text += "_bpf_readarg_" + current_fn_ + "_" + args[0] + "(" +
                   args[1] + ", &__addr, sizeof(__addr));";
-          text += "bpf_probe_read(" + args[2] + ", " + args[3] +
-                  ", (void *)__addr);";
+
+          bool overlap_addr = false;
+          text += check_bpf_probe_read_user(StringRef("bpf_probe_read_user"),
+                  overlap_addr);
+          if (overlap_addr) {
+            error(GET_BEGINLOC(Call), "bpf_probe_read_user not found. Use latest kernel");
+            return false;
+          }
+
+          text += "(" + args[2] + ", " + args[3] + ", (void *)__addr);";
           text += "})";
           rewriter_.ReplaceText(expansionRange(Call->getSourceRange()), text);
         } else if (Decl->getName() == "bpf_usdt_readarg") {
@@ -1086,13 +1239,21 @@ bool BTypeVisitor::VisitBinaryOperator(BinaryOperator *E) {
               error(GET_BEGINLOC(E), "cannot use \"packet\" header type inside a macro");
               return false;
             }
+
+            auto EndLoc = GET_ENDLOC(E);
+            if (EndLoc.isMacroID()) {
+              error(EndLoc, "cannot have macro at the end of expresssion, "
+                            "workaround: put perentheses around macro \"(MARCO)\"");
+              return false;
+            }
+
             uint64_t ofs = C.getFieldOffset(F);
             uint64_t sz = F->isBitField() ? F->getBitWidthValue(C) : C.getTypeSize(F->getType());
             string base = rewriter_.getRewrittenText(expansionRange(Base->getSourceRange()));
             string text = "bpf_dins_pkt(" + fn_args_[0]->getName().str() + ", (u64)" + base + "+" + to_string(ofs >> 3)
                 + ", " + to_string(ofs & 0x7) + ", " + to_string(sz) + ",";
             rewriter_.ReplaceText(expansionRange(SourceRange(GET_BEGINLOC(E), E->getOperatorLoc())), text);
-            rewriter_.InsertTextAfterToken(GET_ENDLOC(E), ")");
+            rewriter_.InsertTextAfterToken(EndLoc, ")");
           }
         }
       }
@@ -1283,6 +1444,11 @@ bool BTypeVisitor::VisitVarDecl(VarDecl *Decl) {
       if (numcpu <= 0)
         numcpu = 1;
       table.max_entries = numcpu;
+    } else if (section_attr == "maps/ringbuf") {
+      map_type = BPF_MAP_TYPE_RINGBUF;
+      // values from libbpf/src/libbpf_probes.c
+      table.key_size = 0;
+      table.leaf_size = 0;
     } else if (section_attr == "maps/perf_array") {
       map_type = BPF_MAP_TYPE_PERF_EVENT_ARRAY;
     } else if (section_attr == "maps/queue") {
@@ -1499,6 +1665,7 @@ void BTypeConsumer::HandleTranslationUnit(ASTContext &Context) {
 
     btype_visitor_.TraverseDecl(D);
   }
+
 }
 
 BFrontendAction::BFrontendAction(llvm::raw_ostream &os, unsigned flags,
@@ -1536,8 +1703,21 @@ void BFrontendAction::DoMiscWorkAround() {
   // to guard certain fields. The workaround here intends to define
   // CONFIG_CC_STACKPROTECTOR properly based on other configs, so it relieved any bpf
   // program (using task_struct, etc.) of patching the below code.
-  rewriter_->getEditBuffer(rewriter_->getSourceMgr().getMainFileID()).InsertText(0,
-    "#if defined(BPF_LICENSE)\n"
+  std::string probefunc = check_bpf_probe_read_kernel();
+  if (kresolver) {
+    bcc_free_symcache(kresolver, -1);
+    kresolver = NULL;
+  }
+  if (probefunc == "bpf_probe_read") {
+    probefunc = "#define bpf_probe_read_kernel bpf_probe_read\n"
+      "#define bpf_probe_read_kernel_str bpf_probe_read_str\n"
+      "#define bpf_probe_read_user bpf_probe_read\n"
+      "#define bpf_probe_read_user_str bpf_probe_read_str\n";
+  }
+  else {
+    probefunc = "";
+  }
+  std::string prologue = "#if defined(BPF_LICENSE)\n"
     "#error BPF_LICENSE cannot be specified through cflags\n"
     "#endif\n"
     "#if !defined(CONFIG_CC_STACKPROTECTOR)\n"
@@ -1546,11 +1726,18 @@ void BFrontendAction::DoMiscWorkAround() {
     "    || defined(CONFIG_CC_STACKPROTECTOR_STRONG)\n"
     "#define CONFIG_CC_STACKPROTECTOR\n"
     "#endif\n"
-    "#endif\n",
+    "#endif\n";
+  prologue = prologue + probefunc;
+  rewriter_->getEditBuffer(rewriter_->getSourceMgr().getMainFileID()).InsertText(0,
+    prologue,
     false);
 
   rewriter_->getEditBuffer(rewriter_->getSourceMgr().getMainFileID()).InsertTextAfter(
+#if LLVM_MAJOR_VERSION >= 12
+    rewriter_->getSourceMgr().getBufferOrFake(rewriter_->getSourceMgr().getMainFileID()).getBufferSize(),
+#else
     rewriter_->getSourceMgr().getBuffer(rewriter_->getSourceMgr().getMainFileID())->getBufferSize(),
+#endif
     "\n#include <bcc/footer.h>\n");
 }
 

@@ -7,13 +7,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/resource.h>
 #include <unistd.h>
 #include <time.h>
 #include <bpf/libbpf.h>
 #include <bpf/bpf.h>
 #include "filelife.h"
 #include "filelife.skel.h"
+#include "trace_helpers.h"
 
 #define PERF_BUFFER_PAGES	16
 #define PERF_POLL_TIMEOUT_MS	100
@@ -24,11 +24,11 @@ static struct env {
 } env = { };
 
 const char *argp_program_version = "filelife 0.1";
-const char *argp_program_bug_address = "<ethercflow@gmail.com>";
+const char *argp_program_bug_address = "<bpf@vger.kernel.org>";
 const char argp_program_doc[] =
 "Trace the lifespan of short-lived files.\n"
 "\n"
-"USAGE: filelife [-p PID]\n"
+"USAGE: filelife  [--help] [-p PID]\n"
 "\n"
 "EXAMPLES:\n"
 "    filelife         # trace all events\n"
@@ -64,21 +64,11 @@ static error_t parse_arg(int key, char *arg, struct argp_state *state)
 }
 
 int libbpf_print_fn(enum libbpf_print_level level,
-		const char *format, va_list args)
+		    const char *format, va_list args)
 {
 	if (level == LIBBPF_DEBUG && !env.verbose)
 		return 0;
 	return vfprintf(stderr, format, args);
-}
-
-static int bump_memlock_rlimit(void)
-{
-	struct rlimit rlim_new = {
-		.rlim_cur	= RLIM_INFINITY,
-		.rlim_max	= RLIM_INFINITY,
-	};
-
-	return setrlimit(RLIMIT_MEMLOCK, &rlim_new);
 }
 
 void handle_event(void *ctx, int cpu, void *data, __u32 data_sz)
@@ -127,7 +117,7 @@ int main(int argc, char **argv)
 
 	obj = filelife_bpf__open();
 	if (!obj) {
-		fprintf(stderr, "failed to open and/or load BPF ojbect\n");
+		fprintf(stderr, "failed to open and/or load BPF object\n");
 		return 1;
 	}
 

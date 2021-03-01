@@ -194,6 +194,7 @@ class Probe {
   std::string provider_;
   std::string name_;
   uint64_t semaphore_;
+  uint64_t semaphore_offset_;
 
   std::vector<Location> locations_;
 
@@ -214,11 +215,13 @@ class Probe {
 
 public:
   Probe(const char *bin_path, const char *provider, const char *name,
-        uint64_t semaphore, const optional<int> &pid, uint8_t mod_match_inode_only = 1);
+        uint64_t semaphore, uint64_t semaphore_offset,
+        const optional<int> &pid, uint8_t mod_match_inode_only = 1);
 
   size_t num_locations() const { return locations_.size(); }
   size_t num_arguments() const { return locations_.front().arguments_.size(); }
   uint64_t semaphore()   const { return semaphore_; }
+  uint64_t semaphore_offset() const { return semaphore_offset_; }
 
   uint64_t address(size_t n = 0) const { return locations_[n].address_; }
   const char *location_bin_path(size_t n = 0) const { return locations_[n].bin_path_.c_str(); }
@@ -262,6 +265,8 @@ class Context {
 
   void add_probe(const char *binpath, const struct bcc_elf_usdt *probe);
   std::string resolve_bin_path(const std::string &bin_path);
+  Probe *get_checked(const std::string &provider_name,
+                     const std::string &probe_name);
 
 private:
   uint8_t mod_match_inode_only_;
@@ -285,6 +290,9 @@ public:
   bool enable_probe(const std::string &probe_name, const std::string &fn_name);
   bool enable_probe(const std::string &provider_name,
                     const std::string &probe_name, const std::string &fn_name);
+  bool addsem_probe(const std::string &provider_name,
+                    const std::string &probe_name, const std::string &fn_name,
+                    int16_t val);
 
   typedef void (*each_cb)(struct bcc_usdt *);
   void each(each_cb callback);
