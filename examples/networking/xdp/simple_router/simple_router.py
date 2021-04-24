@@ -8,7 +8,7 @@ import sys
 import socket
 import ctypes as ct
 
-FIB_SIZE = 10000000
+FIB_SIZE = 10000001
 ARP_SIZE = 128
 
 def str_to_ctype_mac(mac_str):
@@ -57,6 +57,12 @@ with open('routes.csv', 'r') as routes:
         if count > 0 and count % 1000000 == 0:
             print(f'Loaded {count} routes')
 print(f'Loaded {count} routes')
+
+daddr = socket.inet_aton('172.0.0.1')
+key = fib.Key(int.from_bytes(daddr, 'little'))
+leaf = fib.Leaf(0)
+fib[key] = leaf
+print(f'Added local route towards 172.0.0.1')
 
 # Attach program to interfaces
 fn = b.load_func("router", BPF.XDP)

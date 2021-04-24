@@ -49,7 +49,7 @@ int router(struct xdp_md *ctx) {
 
     if (eth->h_proto != htons(ETH_P_IP)) {
         // Don't handle
-        return XDP_DROP;
+        return XDP_PASS;
     }
 
     struct iphdr *iph = (struct iphdr *)(eth + 1);
@@ -62,6 +62,11 @@ int router(struct xdp_md *ctx) {
     if (!fib_value) {
         // Don't handle
         return XDP_DROP;
+    }
+
+    if (fib_value->next_hop == 0) {
+        // Local destination
+        return XDP_PASS;
     }
 
     struct arp_value *arp_value = arp_table.lookup(&fib_value->next_hop);
