@@ -1,6 +1,6 @@
 #!/usr/bin/python3
 
-from bcc import BPF
+from bcc import BPF, lib
 import argparse
 import pyroute2
 import time
@@ -8,8 +8,9 @@ import sys
 import socket
 import ctypes as ct
 
-FIB_SIZE = 10000001
-ARP_SIZE = 128
+FIB_SIZE   = 10000001
+ARP_SIZE   = 128
+BATCH_SIZE = 1000000
 
 def str_to_ctype_mac(mac_str):
     bytes_ = mac_str.split(':')
@@ -46,17 +47,35 @@ print(f'Loaded {count} arp entries')
 
 fib = b.get_table("fib")
 count = 0
+loaded = 0
+keys = (fib.Key * BATCH_SIZE)()
+values = (fib.Leaf * BATCH_SIZE)()
 with open('routes.csv', 'r') as routes:
     for line in routes:
         daddr = socket.inet_aton(line.split(';')[0])
         next_hop = socket.inet_aton(line.split(';')[1])
-        key = fib.Key(int.from_bytes(daddr, 'little'))
-        leaf = fib.Leaf(int.from_bytes(next_hop, 'little'))
-        fib[key] = leaf
+        keys[count] = fib.Key(int.from_bytes(daddr, 'little'))
+        values[count] = fib.Leaf(int.from_bytes(next_hop, 'little'))
         count += 1
-        if count > 0 and count % 1000000 == 0:
-            print(f'Loaded {count} routes')
-print(f'Loaded {count} routes')
+        if count == BATCH_SIZE:
+            ct_count = ct.c_int(count)
+            ret = lib.bpf_map_update_batch(fib.get_fd(), keys, values,
+                                           ct.byref(ct_count), None)
+            if ret:
+                print('Error filling fib: %d', ct.get_errno())
+                exit(1)
+            loaded += count
+            count = 0
+            print(f'Loaded {loaded} routes')
+if count > 0:
+    ct_count = ct.c_int(count)
+    ret = lib.bpf_map_update_batch(fib.get_fd(), keys, values, ct.byref(count),
+                                   None)
+    if ret:
+        print('Error filling fib: %d', ct.get_errno())
+        exit(1)
+    loaded += count
+    print(f'Loaded {loaded} routes')
 
 daddr = socket.inet_aton('172.0.0.1')
 key = fib.Key(int.from_bytes(daddr, 'little'))
