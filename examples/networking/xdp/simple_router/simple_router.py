@@ -69,7 +69,7 @@ with open('routes.csv', 'r') as routes:
             print(f'Loaded {loaded} routes')
 if count > 0:
     ct_count = ct.c_int(count)
-    ret = lib.bpf_map_update_batch(fib.get_fd(), keys, values, ct.byref(count),
+    ret = lib.bpf_map_update_batch(fib.get_fd(), keys, values, ct.byref(ct_count),
                                    None)
     if ret:
         print('Error filling fib: %d', ct.get_errno())
